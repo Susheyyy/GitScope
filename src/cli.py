@@ -32,6 +32,7 @@ def serve(host: str, port: int):
 @click.argument("target", type=str)
 @click.option("--since", type=str, default=None, help="Filter commits after date (e.g. '30 days ago', '2024-01-01')")
 @click.option("--until", type=str, default=None, help="Filter commits up to date")
+@click.option("--limit", type=int, default=15, help="Number of file hotspots to display in terminal")
 @click.option(
     "--format",
     "output_format",
@@ -39,7 +40,7 @@ def serve(host: str, port: int):
     default="terminal",
 )
 @click.option("--output", type=click.Path(writable=True), default=None, help="Save report to file path")
-def analyze(target: str, since: Optional[str], until: Optional[str], output_format: str, output: Optional[str]):
+def analyze(target: str, since: Optional[str], until: Optional[str], limit: int, output_format: str, output: Optional[str]):
     try:
         with console.status(f"[bold cyan]Preparing repository {target}...[/bold cyan]"):
             manager = GitRepoManager(target)
@@ -69,7 +70,7 @@ def analyze(target: str, since: Optional[str], until: Optional[str], output_form
             return
 
         if output_format == "markdown":
-            result = Exporter.to_markdown(report)
+            result = Exporter.to_markdown(report, top_n=limit)
             if output:
                 Path(output).write_text(result, encoding="utf-8")
                 console.print(f"[green]Report saved to {output}[/green]")
@@ -84,10 +85,10 @@ def analyze(target: str, since: Optional[str], until: Optional[str], output_form
             console.print(f"[green]Interactive HTML report saved to {target_out}[/green]")
             return
 
-        _render_terminal_dashboard(report)
+        _render_terminal_dashboard(report, limit=limit)
 
         if output:
-            Path(output).write_text(Exporter.to_markdown(report), encoding="utf-8")
+            Path(output).write_text(Exporter.to_markdown(report, top_n=limit), encoding="utf-8")
             console.print(f"\n[green]Markdown copy of report saved to {output}[/green]")
 
     except Exception as e:
@@ -95,7 +96,7 @@ def analyze(target: str, since: Optional[str], until: Optional[str], output_form
         raise click.Abort()
 
 
-def _render_terminal_dashboard(report):
+def _render_terminal_dashboard(report, limit: int = 15):
     console.print(f"\n[bold green]GitScope Analysis Report:[/bold green] [bold white]{report.repo_name}[/bold white]")
     console.print(f"Total Commits: [cyan]{report.total_commits}[/cyan] | Contributors: [cyan]{report.total_authors}[/cyan]")
     console.print(f"Commit Hygiene Score: [bold yellow]{report.hygiene.quality_score} / 100[/bold yellow]\n")
@@ -107,7 +108,7 @@ def _render_terminal_dashboard(report):
     c_table.add_column("Total Churn", justify="right")
     c_table.add_column("Summary of Work", style="white")
 
-    for c in report.contributors:
+    for c in report.contributors[:limit]:
         c_table.add_row(
             f"{c.name}\n[dim]{c.email}[/dim]",
             str(c.total_commits),
@@ -118,7 +119,7 @@ def _render_terminal_dashboard(report):
 
     console.print(c_table)
 
-    f_table = Table(title="\nTop File Hotspots (High Churn & Bus-Factor Risk)")
+    f_table = Table(title=f"\nTop File Hotspots (Showing {min(limit, len(report.hotspots_files))} of {len(report.hotspots_files)})")
     f_table.add_column("File Path", style="cyan", no_wrap=True)
     f_table.add_column("Status", justify="center")
     f_table.add_column("Commits", justify="right")
@@ -127,7 +128,7 @@ def _render_terminal_dashboard(report):
     f_table.add_column("Risk", justify="center")
     f_table.add_column("Top Author", style="magenta")
 
-    for f in report.hotspots_files[:10]:
+    for f in report.hotspots_files[:limit]:
         top_author = f.top_contributors[0].name if f.top_contributors else "N/A"
         risk_style = "bold red" if f.risk_level == "High" else ("yellow" if f.risk_level == "Medium" else "green")
         status_text = "[red]Deleted[/red]" if f.is_deleted else "[green]Active[/green]"

@@ -43,23 +43,17 @@ PYTHONPATH=src python -m cli analyze <PATH_OR_URL>
 
 Examples:
 ```powershell
-# Analyze the current local repository in terminal
 $env:PYTHONPATH="src"; python -m cli analyze .
 
-# Generate an interactive standalone HTML report (with treemap & filters)
 $env:PYTHONPATH="src"; python -m cli analyze . --format html --output report.html
 
-# Analyze a public remote GitHub repository
 $env:PYTHONPATH="src"; python -m cli analyze https://github.com/Susheyyy/GitScope
 
-# Filter by date range
 $env:PYTHONPATH="src"; python -m cli analyze . --since "30 days ago"
 $env:PYTHONPATH="src"; python -m cli analyze . --since "2024-01-01" --until "2024-12-31"
 
-# Export report to Markdown
 $env:PYTHONPATH="src"; python -m cli analyze . --format markdown --output report.md
 
-# Export report to JSON
 $env:PYTHONPATH="src"; python -m cli analyze . --format json --output report.json
 ```
 
@@ -74,10 +68,8 @@ pip install -e .
 
 Run directly:
 ```bash
-# Start Web Server
 gitscope serve
 
-# Run CLI analysis
 gitscope analyze . --format html --output report.html
 ```
 

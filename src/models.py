@@ -27,6 +27,21 @@ class HotspotItem(BaseModel):
     risk_level: str = "Low"
 
 
+class ContributorChangeItem(BaseModel):
+    commit_hash: str
+    timestamp: datetime
+    message: str
+    lines_added: int
+    lines_deleted: int
+    files_changed: List[str] = Field(default_factory=list)
+
+
+class ContributorHygieneStats(BaseModel):
+    conventional_count: int = 0
+    vague_count: int = 0
+    hygiene_score: int = 100
+
+
 class AuthorProfile(BaseModel):
     name: str
     email: str
@@ -39,6 +54,8 @@ class AuthorProfile(BaseModel):
     primary_directories: List[str] = Field(default_factory=list)
     primary_files: List[str] = Field(default_factory=list)
     summary: str = ""
+    change_log: List[ContributorChangeItem] = Field(default_factory=list)
+    hygiene: ContributorHygieneStats = Field(default_factory=ContributorHygieneStats)
 
 
 class CoupledPair(BaseModel):
@@ -61,8 +78,9 @@ class CommitHygieneIssue(BaseModel):
 class CommitHygieneReport(BaseModel):
     quality_score: int = Field(description="Score from 0 to 100", default=100)
     total_scanned: int = 0
+    conventional_count: int = 0
+    conventional_percentage: float = 0.0
     vague_commits_count: int = 0
-    dump_commits_count: int = 0
     ticket_referenced_count: int = 0
     issues: List[CommitHygieneIssue] = Field(default_factory=list)
 

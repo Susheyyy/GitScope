@@ -11,6 +11,8 @@ from models import (
     AuthorProfile,
     CommitHygieneIssue,
     CommitHygieneReport,
+    ContributorChangeItem,
+    ContributorHygieneStats,
     ContributorStats,
     CoupledPair,
     HotspotItem,
@@ -28,8 +30,14 @@ VAGUE_MESSAGE_PATTERNS = [
     r"^(misc|minor|stuff)$",
     r"^(commit|save)$",
     r"^(\.)$",
+    r"^(ui fix|ui fixes|bug fix|bug fixes|quick fix|hotfix)$",
+    r"^(small changes|minor changes|more changes|few fixes)$",
 ]
 TICKET_REGEX = re.compile(r"([A-Z]{2,10}-\d+|#\d+)")
+CONVENTIONAL_COMMIT_REGEX = re.compile(
+    r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_\-\./]+\))?:\s+.+",
+    re.IGNORECASE,
+)
 
 
 class AnalysisEngine:
@@ -122,6 +130,9 @@ class AnalysisEngine:
                 "last_commit": None,
                 "dirs": defaultdict(int),
                 "files": defaultdict(int),
+                "change_log": [],
+                "conventional_count": 0,
+                "vague_count": 0,
             }
         )
 
@@ -131,7 +142,7 @@ class AnalysisEngine:
 
         hygiene_issues: List[CommitHygieneIssue] = []
         vague_count = 0
-        dump_count = 0
+        conventional_count = 0
         ticket_count = 0
 
         for commit in commits:
@@ -139,10 +150,15 @@ class AnalysisEngine:
             for a in commit.authors:
                 all_authors.add(a.email)
 
-            commit_total_churn = sum(c.added + c.deleted for c in commit.changes)
-
             stripped_msg = commit.message.strip()
-            is_vague = any(r.match(stripped_msg) for r in self._vague_regexes) or len(stripped_msg) <= 3
+            is_conventional = bool(CONVENTIONAL_COMMIT_REGEX.match(stripped_msg))
+            if is_conventional:
+                conventional_count += 1
+
+            is_vague = False
+            if not is_conventional:
+                is_vague = any(r.match(stripped_msg) for r in self._vague_regexes) or len(stripped_msg) <= 4
+
             if is_vague:
                 vague_count += 1
                 hygiene_issues.append(
@@ -151,19 +167,7 @@ class AnalysisEngine:
                         author_name=commit.author_name,
                         message=commit.message,
                         issue_type="Vague Message",
-                        details=f"Subject line '{commit.message}' is uninformative",
-                    )
-                )
-
-            if commit_total_churn >= 800 and len(commit.changes) >= 10:
-                dump_count += 1
-                hygiene_issues.append(
-                    CommitHygieneIssue(
-                        commit_hash=commit.hash[:8],
-                        author_name=commit.author_name,
-                        message=commit.message,
-                        issue_type="Dump Commit",
-                        details=f"High churn (+/- {commit_total_churn} lines across {len(commit.changes)} files) in single commit",
+                        details=f"Subject '{commit.message}' provides no context on what was changed or why",
                     )
                 )
 
@@ -171,6 +175,9 @@ class AnalysisEngine:
                 ticket_count += 1
 
             unique_files_in_commit = set()
+            commit_files_list = []
+            commit_lines_added = 0
+            commit_lines_deleted = 0
 
             for change in commit.changes:
                 if change.old_path:
@@ -178,6 +185,10 @@ class AnalysisEngine:
 
                 f_path = change.path
                 unique_files_in_commit.add(f_path)
+                commit_files_list.append(f_path)
+                commit_lines_added += change.added
+                commit_lines_deleted += change.deleted
+
                 raw_file_commits[f_path].add(commit.hash)
                 raw_file_added[f_path] += change.added
                 raw_file_deleted[f_path] += change.deleted
@@ -235,10 +246,25 @@ class AnalysisEngine:
                 prof = author_summary[author.email]
                 prof["name"] = author.name
                 prof["commits"] += 1
+                if is_conventional:
+                    prof["conventional_count"] += 1
+                if is_vague:
+                    prof["vague_count"] += 1
                 if not prof["first_commit"] or commit.timestamp < prof["first_commit"]:
                     prof["first_commit"] = commit.timestamp
                 if not prof["last_commit"] or commit.timestamp > prof["last_commit"]:
                     prof["last_commit"] = commit.timestamp
+
+                prof["change_log"].append(
+                    ContributorChangeItem(
+                        commit_hash=commit.hash[:8],
+                        timestamp=commit.timestamp,
+                        message=commit.message,
+                        lines_added=commit_lines_added,
+                        lines_deleted=commit_lines_deleted,
+                        files_changed=commit_files_list[:8],
+                    )
+                )
 
         file_commits: Dict[str, Set[str]] = defaultdict(set)
         file_added: Dict[str, int] = defaultdict(int)
@@ -355,6 +381,16 @@ class AnalysisEngine:
             summary_text = self._generate_author_summary(
                 prof["name"], prof["commits"], prof["added"], prof["deleted"], top_dirs, top_files
             )
+
+            c_total = prof["commits"]
+            v_count = prof["vague_count"]
+            conv_count = prof["conventional_count"]
+            author_score = 100
+            if c_total > 0:
+                author_score = max(0, 100 - int((v_count / c_total) * 70))
+                if conv_count == c_total:
+                    author_score = 100
+
             contributor_profiles.append(
                 AuthorProfile(
                     name=prof["name"],
@@ -368,6 +404,12 @@ class AnalysisEngine:
                     primary_directories=top_dirs,
                     primary_files=top_files,
                     summary=summary_text,
+                    change_log=prof["change_log"][:30],
+                    hygiene=ContributorHygieneStats(
+                        conventional_count=conv_count,
+                        vague_count=v_count,
+                        hygiene_score=author_score,
+                    ),
                 )
             )
         contributor_profiles.sort(key=lambda x: x.total_commits, reverse=True)
@@ -394,16 +436,21 @@ class AnalysisEngine:
 
         total_scanned = len(all_commit_hashes)
         penalty = 0
+        conventional_pct = round((conventional_count / total_scanned) * 100, 1) if total_scanned > 0 else 0.0
+
         if total_scanned > 0:
-            penalty += int((vague_count / total_scanned) * 50)
-            penalty += int((dump_count / total_scanned) * 40)
+            penalty += int((vague_count / total_scanned) * 60)
+            if conventional_pct < 50.0:
+                penalty += int((1.0 - (conventional_pct / 100.0)) * 20)
+
         quality_score = max(0, 100 - penalty)
 
         hygiene_report = CommitHygieneReport(
             quality_score=quality_score,
             total_scanned=total_scanned,
+            conventional_count=conventional_count,
+            conventional_percentage=conventional_pct,
             vague_commits_count=vague_count,
-            dump_commits_count=dump_count,
             ticket_referenced_count=ticket_count,
             issues=hygiene_issues[:20],
         )

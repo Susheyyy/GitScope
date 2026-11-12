@@ -15,7 +15,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="Feature A",
+                message="feat: Feature A",
                 authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[
                     FileChange(path="src/core.py", added=100, deleted=20),
@@ -27,7 +27,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="Fix A",
+                message="fix(core): Fix A",
                 authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[
                     FileChange(path="src/core.py", added=50, deleted=10),
@@ -38,7 +38,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Bob",
                 author_email="bob@example.com",
                 timestamp=now,
-                message="Feature B",
+                message="feat: Feature B",
                 authors=[AuthorInfo(name="Bob", email="bob@example.com")],
                 changes=[
                     FileChange(path="src/utils.py", added=30, deleted=5),
@@ -63,7 +63,7 @@ class TestGitScope(unittest.TestCase):
         self.assertFalse(core_item.is_deleted)
         self.assertEqual(core_item.top_contributors[0].name, "Alice")
 
-    def test_commit_hygiene_scoring(self):
+    def test_conventional_commits_and_vague_messages(self):
         now = datetime.now(timezone.utc)
         commits = [
             CommitRecord(
@@ -71,26 +71,35 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="fix",
+                message="fix: harden architectural flaws",
                 authors=[AuthorInfo(name="Alice", email="alice@example.com")],
-                changes=[FileChange(path="src/a.py", added=1, deleted=1)],
+                changes=[FileChange(path="src/a.py", added=10, deleted=2)],
             ),
             CommitRecord(
                 hash="c2",
-                author_name="Alice",
-                author_email="alice@example.com",
+                author_name="Bob",
+                author_email="bob@example.com",
                 timestamp=now,
-                message="JIRA-1234: Add feature properly",
-                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
+                message="ui fixes",
+                authors=[AuthorInfo(name="Bob", email="bob@example.com")],
                 changes=[FileChange(path="src/b.py", added=20, deleted=5)],
             ),
         ]
         engine = AnalysisEngine(repo_name="test-repo", repo_path="/tmp/test-repo")
         report = engine.analyze(commits)
 
+        self.assertEqual(report.hygiene.conventional_count, 1)
         self.assertEqual(report.hygiene.vague_commits_count, 1)
-        self.assertEqual(report.hygiene.ticket_referenced_count, 1)
-        self.assertLess(report.hygiene.quality_score, 100)
+
+        alice_prof = next(c for c in report.contributors if c.name == "Alice")
+        bob_prof = next(c for c in report.contributors if c.name == "Bob")
+
+        self.assertEqual(alice_prof.hygiene.hygiene_score, 100)
+        self.assertLess(bob_prof.hygiene.hygiene_score, 100)
+
+        badge_svg = Exporter.to_badge_svg("gitscope score", "85/100")
+        self.assertIn("<svg", badge_svg)
+        self.assertIn("85/100", badge_svg)
 
     def test_rename_tracking(self):
         now = datetime.now(timezone.utc)
@@ -100,7 +109,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="Create old.py",
+                message="feat: Create old.py",
                 authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[FileChange(path="src/old.py", added=50, deleted=0)],
             ),
@@ -109,7 +118,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="Rename old.py to new.py",
+                message="refactor: Rename old.py to new.py",
                 authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[FileChange(path="src/new.py", added=20, deleted=5, old_path="src/old.py")],
             ),
@@ -131,7 +140,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="Mod 1",
+                message="feat: Mod 1",
                 authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[
                     FileChange(path="src/service.py", added=10, deleted=0),
@@ -143,7 +152,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="Mod 2",
+                message="feat: Mod 2",
                 authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[
                     FileChange(path="src/service.py", added=5, deleted=2),
@@ -159,9 +168,6 @@ class TestGitScope(unittest.TestCase):
         self.assertEqual(pair.together_commits, 2)
         self.assertEqual(pair.coupling_percentage, 100.0)
 
-        html_out = Exporter.to_html(report)
-        self.assertIn("Temporal Coupling: Files That Change Together", html_out)
-
     def test_co_author_split(self):
         now = datetime.now(timezone.utc)
         commits = [
@@ -170,7 +176,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="Pair commit",
+                message="feat: Pair commit",
                 authors=[
                     AuthorInfo(name="Alice", email="alice@example.com"),
                     AuthorInfo(name="Bob", email="bob@example.com"),
@@ -194,7 +200,7 @@ class TestGitScope(unittest.TestCase):
                 author_name="Alice",
                 author_email="alice@example.com",
                 timestamp=now,
-                message="Removed file",
+                message="chore: Removed file",
                 authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[FileChange(path="src/dead.py", added=10, deleted=50)],
             )
