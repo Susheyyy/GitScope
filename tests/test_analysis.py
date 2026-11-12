@@ -63,6 +63,35 @@ class TestGitScope(unittest.TestCase):
         self.assertFalse(core_item.is_deleted)
         self.assertEqual(core_item.top_contributors[0].name, "Alice")
 
+    def test_commit_hygiene_scoring(self):
+        now = datetime.now(timezone.utc)
+        commits = [
+            CommitRecord(
+                hash="c1",
+                author_name="Alice",
+                author_email="alice@example.com",
+                timestamp=now,
+                message="fix",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
+                changes=[FileChange(path="src/a.py", added=1, deleted=1)],
+            ),
+            CommitRecord(
+                hash="c2",
+                author_name="Alice",
+                author_email="alice@example.com",
+                timestamp=now,
+                message="JIRA-1234: Add feature properly",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
+                changes=[FileChange(path="src/b.py", added=20, deleted=5)],
+            ),
+        ]
+        engine = AnalysisEngine(repo_name="test-repo", repo_path="/tmp/test-repo")
+        report = engine.analyze(commits)
+
+        self.assertEqual(report.hygiene.vague_commits_count, 1)
+        self.assertEqual(report.hygiene.ticket_referenced_count, 1)
+        self.assertLess(report.hygiene.quality_score, 100)
+
     def test_rename_tracking(self):
         now = datetime.now(timezone.utc)
         commits = [
@@ -93,6 +122,45 @@ class TestGitScope(unittest.TestCase):
         new_item = next(f for f in report.hotspots_files if f.path == "src/new.py")
         self.assertEqual(new_item.commits, 2)
         self.assertEqual(new_item.total_churn, 75)
+
+    def test_temporal_coupling(self):
+        now = datetime.now(timezone.utc)
+        commits = [
+            CommitRecord(
+                hash="c1",
+                author_name="Alice",
+                author_email="alice@example.com",
+                timestamp=now,
+                message="Mod 1",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
+                changes=[
+                    FileChange(path="src/service.py", added=10, deleted=0),
+                    FileChange(path="src/routes.py", added=10, deleted=0),
+                ],
+            ),
+            CommitRecord(
+                hash="c2",
+                author_name="Alice",
+                author_email="alice@example.com",
+                timestamp=now,
+                message="Mod 2",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
+                changes=[
+                    FileChange(path="src/service.py", added=5, deleted=2),
+                    FileChange(path="src/routes.py", added=5, deleted=2),
+                ],
+            ),
+        ]
+        engine = AnalysisEngine(repo_name="test-repo", repo_path="/tmp/test-repo")
+        report = engine.analyze(commits)
+
+        self.assertTrue(len(report.coupled_files) > 0)
+        pair = report.coupled_files[0]
+        self.assertEqual(pair.together_commits, 2)
+        self.assertEqual(pair.coupling_percentage, 100.0)
+
+        html_out = Exporter.to_html(report)
+        self.assertIn("Temporal Coupling: Files That Change Together", html_out)
 
     def test_co_author_split(self):
         now = datetime.now(timezone.utc)

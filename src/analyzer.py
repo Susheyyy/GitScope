@@ -2,11 +2,34 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+from itertools import combinations
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set
+import re
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from models import AuthorProfile, ContributorStats, HotspotItem, ScopeReport
+from models import (
+    AuthorProfile,
+    CommitHygieneIssue,
+    CommitHygieneReport,
+    ContributorStats,
+    CoupledPair,
+    HotspotItem,
+    ScopeReport,
+)
 from parser import CommitRecord
+
+VAGUE_MESSAGE_PATTERNS = [
+    r"^(fix|fixes|fixed)$",
+    r"^(update|updates|updated)$",
+    r"^(wip|work in progress)$",
+    r"^(changes|change)$",
+    r"^(asdf|test|testing|foo|bar)$",
+    r"^(cleanup|clean up)$",
+    r"^(misc|minor|stuff)$",
+    r"^(commit|save)$",
+    r"^(\.)$",
+]
+TICKET_REGEX = re.compile(r"([A-Z]{2,10}-\d+|#\d+)")
 
 
 class AnalysisEngine:
@@ -23,6 +46,7 @@ class AnalysisEngine:
         self.since = since
         self.until = until
         self.existing_files = existing_files or set()
+        self._vague_regexes = [re.compile(p, re.IGNORECASE) for p in VAGUE_MESSAGE_PATTERNS]
 
     @staticmethod
     def _calculate_bus_factor(contributors: List[ContributorStats], threshold: float = 0.8) -> int:
@@ -45,6 +69,23 @@ class AnalysisEngine:
         elif total_churn >= churn_p75 or bus_factor == 1:
             return "Medium"
         return "Low"
+
+    @staticmethod
+    def _generate_author_summary(
+        name: str,
+        total_commits: int,
+        added: int,
+        deleted: int,
+        top_dirs: List[str],
+        top_files: List[str],
+    ) -> str:
+        churn = added + deleted
+        files_str = ", ".join(f"`{Path(f).name}`" for f in top_files[:3]) if top_files else "none"
+        dirs_str = ", ".join(f"`{d}`" for d in top_dirs[:2]) if top_dirs else "root"
+        return (
+            f"Authored {total_commits} commit{'s' if total_commits != 1 else ''} with {churn} lines modified "
+            f"(+{added}/-{deleted}). Focused primarily on {dirs_str}, mainly editing {files_str}."
+        )
 
     def analyze(self, commits: Iterable[CommitRecord]) -> ScopeReport:
         rename_parent: Dict[str, str] = {}
@@ -84,19 +125,59 @@ class AnalysisEngine:
             }
         )
 
+        co_change_counts: Dict[Tuple[str, str], int] = defaultdict(int)
         all_commit_hashes: Set[str] = set()
         all_authors: Set[str] = set()
+
+        hygiene_issues: List[CommitHygieneIssue] = []
+        vague_count = 0
+        dump_count = 0
+        ticket_count = 0
 
         for commit in commits:
             all_commit_hashes.add(commit.hash)
             for a in commit.authors:
                 all_authors.add(a.email)
 
+            commit_total_churn = sum(c.added + c.deleted for c in commit.changes)
+
+            stripped_msg = commit.message.strip()
+            is_vague = any(r.match(stripped_msg) for r in self._vague_regexes) or len(stripped_msg) <= 3
+            if is_vague:
+                vague_count += 1
+                hygiene_issues.append(
+                    CommitHygieneIssue(
+                        commit_hash=commit.hash[:8],
+                        author_name=commit.author_name,
+                        message=commit.message,
+                        issue_type="Vague Message",
+                        details=f"Subject line '{commit.message}' is uninformative",
+                    )
+                )
+
+            if commit_total_churn >= 800 and len(commit.changes) >= 10:
+                dump_count += 1
+                hygiene_issues.append(
+                    CommitHygieneIssue(
+                        commit_hash=commit.hash[:8],
+                        author_name=commit.author_name,
+                        message=commit.message,
+                        issue_type="Dump Commit",
+                        details=f"High churn (+/- {commit_total_churn} lines across {len(commit.changes)} files) in single commit",
+                    )
+                )
+
+            if TICKET_REGEX.search(commit.message):
+                ticket_count += 1
+
+            unique_files_in_commit = set()
+
             for change in commit.changes:
                 if change.old_path:
                     rename_parent[change.old_path] = change.path
 
                 f_path = change.path
+                unique_files_in_commit.add(f_path)
                 raw_file_commits[f_path].add(commit.hash)
                 raw_file_added[f_path] += change.added
                 raw_file_deleted[f_path] += change.deleted
@@ -109,6 +190,11 @@ class AnalysisEngine:
                     f_auth["commits"] += credit_share
                     f_auth["added"] += int(change.added * credit_share)
                     f_auth["deleted"] += int(change.deleted * credit_share)
+
+            if len(unique_files_in_commit) <= 30:
+                canonical_unique = {find_canonical(p) for p in unique_files_in_commit}
+                for f1, f2 in combinations(sorted(canonical_unique), 2):
+                    co_change_counts[(f1, f2)] += 1
 
             dirs_touched_in_commit = {
                 (
@@ -262,11 +348,13 @@ class AnalysisEngine:
             for d in dir_items:
                 d.risk_level = self._evaluate_risk(d.total_churn, d.bus_factor, dir_p75)
 
-        # Build Contributor Profiles
         contributor_profiles: List[AuthorProfile] = []
         for email, prof in author_summary.items():
             top_dirs = [d[0] for d in sorted(prof["dirs"].items(), key=lambda x: x[1], reverse=True)[:3]]
             top_files = [f[0] for f in sorted(prof["files"].items(), key=lambda x: x[1], reverse=True)[:3]]
+            summary_text = self._generate_author_summary(
+                prof["name"], prof["commits"], prof["added"], prof["deleted"], top_dirs, top_files
+            )
             contributor_profiles.append(
                 AuthorProfile(
                     name=prof["name"],
@@ -279,9 +367,46 @@ class AnalysisEngine:
                     last_commit=prof["last_commit"],
                     primary_directories=top_dirs,
                     primary_files=top_files,
+                    summary=summary_text,
                 )
             )
         contributor_profiles.sort(key=lambda x: x.total_commits, reverse=True)
+
+        coupled_pairs: List[CoupledPair] = []
+        for (f1, f2), together_count in co_change_counts.items():
+            if together_count >= 2:
+                c1 = len(file_commits.get(f1, set()))
+                c2 = len(file_commits.get(f2, set()))
+                if c1 > 0 and c2 > 0:
+                    pct = round((together_count / min(c1, c2)) * 100, 1)
+                    if pct >= 30.0:
+                        coupled_pairs.append(
+                            CoupledPair(
+                                file_a=f1,
+                                file_b=f2,
+                                together_commits=together_count,
+                                total_commits_a=c1,
+                                total_commits_b=c2,
+                                coupling_percentage=pct,
+                            )
+                        )
+        coupled_pairs.sort(key=lambda cp: (cp.together_commits, cp.coupling_percentage), reverse=True)
+
+        total_scanned = len(all_commit_hashes)
+        penalty = 0
+        if total_scanned > 0:
+            penalty += int((vague_count / total_scanned) * 50)
+            penalty += int((dump_count / total_scanned) * 40)
+        quality_score = max(0, 100 - penalty)
+
+        hygiene_report = CommitHygieneReport(
+            quality_score=quality_score,
+            total_scanned=total_scanned,
+            vague_commits_count=vague_count,
+            dump_commits_count=dump_count,
+            ticket_referenced_count=ticket_count,
+            issues=hygiene_issues[:20],
+        )
 
         return ScopeReport(
             repo_name=self.repo_name,
@@ -293,4 +418,6 @@ class AnalysisEngine:
             contributors=contributor_profiles,
             hotspots_files=file_items,
             hotspots_directories=dir_items,
+            coupled_files=coupled_pairs,
+            hygiene=hygiene_report,
         )
