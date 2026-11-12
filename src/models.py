@@ -17,6 +17,7 @@ class ContributorStats(BaseModel):
 class HotspotItem(BaseModel):
     path: str
     is_directory: bool = False
+    is_deleted: bool = False
     commits: int
     lines_added: int
     lines_deleted: int
@@ -24,6 +25,20 @@ class HotspotItem(BaseModel):
     top_contributors: List[ContributorStats] = Field(default_factory=list)
     bus_factor: int = 1
     risk_level: str = "Low"
+
+
+class AuthorProfile(BaseModel):
+    name: str
+    email: str
+    total_commits: int
+    lines_added: int
+    lines_deleted: int
+    total_churn: int
+    first_commit: Optional[datetime] = None
+    last_commit: Optional[datetime] = None
+    primary_directories: List[str] = Field(default_factory=list)
+    primary_files: List[str] = Field(default_factory=list)
+    summary: str = ""
 
 
 class ScopeReport(BaseModel):
@@ -34,5 +49,6 @@ class ScopeReport(BaseModel):
     until: Optional[str] = None
     total_commits: int
     total_authors: int
+    contributors: List[AuthorProfile] = Field(default_factory=list)
     hotspots_files: List[HotspotItem] = Field(default_factory=list)
     hotspots_directories: List[HotspotItem] = Field(default_factory=list)

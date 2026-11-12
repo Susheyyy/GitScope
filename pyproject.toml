@@ -29,12 +29,11 @@ dev = [
 ]
 
 [project.scripts]
-gitscope = "gitscope.cli:main"
+gitscope = "cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/gitscope"]
+packages = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-

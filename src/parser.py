@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 
 KNOWN_BOT_PATTERNS = [
@@ -24,12 +24,21 @@ DEFAULT_IGNORED_PATHS = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Cargo.lock", "Gemfile.lock"
 }
 
+CO_AUTHOR_REGEX = re.compile(r"Co-authored-by:\s*([^<]+)<([^>]+)>", re.IGNORECASE)
+
 
 @dataclass
 class FileChange:
     path: str
     added: int
     deleted: int
+    old_path: Optional[str] = None
+
+
+@dataclass
+class AuthorInfo:
+    name: str
+    email: str
 
 
 @dataclass
@@ -39,6 +48,7 @@ class CommitRecord:
     author_email: str
     timestamp: datetime
     message: str
+    authors: List[AuthorInfo] = field(default_factory=list)
     changes: List[FileChange] = field(default_factory=list)
 
 
@@ -75,8 +85,25 @@ class GitLogParser:
             return True
         return False
 
+    @staticmethod
+    def _parse_rename_paths(raw_path: str) -> Tuple[str, Optional[str]]:
+        if " => " not in raw_path:
+            return raw_path, None
+
+        if "{" in raw_path and "}" in raw_path:
+            prefix = raw_path[: raw_path.index("{")]
+            suffix = raw_path[raw_path.index("}") + 1 :]
+            curly_content = raw_path[raw_path.index("{") + 1 : raw_path.index("}")]
+            old_mid, new_mid = curly_content.split(" => ", 1)
+            old_p = f"{prefix}{old_mid}{suffix}".replace("//", "/")
+            new_p = f"{prefix}{new_mid}{suffix}".replace("//", "/")
+            return new_p.strip(), old_p.strip()
+
+        old_p, new_p = raw_path.split(" => ", 1)
+        return new_p.strip(), old_p.strip()
+
     def parse_commits(self) -> Iterator[CommitRecord]:
-        format_spec = "%x1e%H%x1f%aN%x1f%aE%x1f%at%x1f%s"
+        format_spec = "%x1e%H%x1f%aN%x1f%aE%x1f%at%x1f%s%x1f%b"
         cmd = [
             "git",
             "-C",
@@ -107,8 +134,8 @@ class GitLogParser:
         if not process.stdout:
             return
 
-        for line in process.stdout:
-            line = line.strip()
+        for raw_line in process.stdout:
+            line = raw_line.rstrip("\r\n")
             if not line:
                 continue
 
@@ -117,19 +144,35 @@ class GitLogParser:
                     yield current_commit
 
                 parts = line[1:].split("\x1f")
-                if len(parts) >= 5:
-                    c_hash, author_name, author_email, epoch_str, msg = parts[0], parts[1], parts[2], parts[3], parts[4]
+                if len(parts) >= 4:
+                    c_hash = parts[0]
+                    author_name = parts[1]
+                    author_email = parts[2].lower()
+                    epoch_str = parts[3]
+                    msg = parts[4] if len(parts) > 4 else ""
+                    body = parts[5] if len(parts) > 5 else ""
+
                     try:
                         timestamp = datetime.utcfromtimestamp(int(epoch_str))
                     except (ValueError, TypeError):
                         timestamp = datetime.utcnow()
 
+                    authors = [AuthorInfo(name=author_name, email=author_email)]
+                    full_text = f"{msg}\n{body}"
+                    for co_name, co_email in CO_AUTHOR_REGEX.findall(full_text):
+                        co_name = co_name.strip()
+                        co_email = co_email.strip().lower()
+                        if not self._is_bot(co_name, co_email):
+                            if not any(a.email == co_email for a in authors):
+                                authors.append(AuthorInfo(name=co_name, email=co_email))
+
                     current_commit = CommitRecord(
                         hash=c_hash,
                         author_name=author_name,
-                        author_email=author_email.lower(),
+                        author_email=author_email,
                         timestamp=timestamp,
                         message=msg,
+                        authors=authors,
                         changes=[],
                     )
                 else:
@@ -141,16 +184,11 @@ class GitLogParser:
                     added = int(added_str) if added_str.isdigit() else 0
                     deleted = int(deleted_str) if deleted_str.isdigit() else 0
 
-                    file_path = raw_path
-                    if " => " in file_path:
-                        match = re.search(r"(?:\{.* => (.*)\}|.* => (.*))", file_path)
-                        if match:
-                            file_path = match.group(1) or match.group(2)
-                            file_path = re.sub(r"[{}\s]", "", file_path)
+                    new_path, old_path = self._parse_rename_paths(raw_path)
 
-                    if not self._is_ignored_file(file_path):
+                    if not self._is_ignored_file(new_path):
                         current_commit.changes.append(
-                            FileChange(path=file_path, added=added, deleted=deleted)
+                            FileChange(path=new_path, added=added, deleted=deleted, old_path=old_path)
                         )
 
         if current_commit and not self._is_bot(current_commit.author_name, current_commit.author_email):

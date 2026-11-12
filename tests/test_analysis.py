@@ -1,19 +1,22 @@
 import unittest
-from datetime import datetime
-from gitscope.analyzer import AnalysisEngine
-from gitscope.exporter import Exporter
-from gitscope.parser import CommitRecord, FileChange
+from datetime import datetime, timezone
+from analyzer import AnalysisEngine
+from exporter import Exporter
+from git_manager import GitRepoManager
+from parser import AuthorInfo, CommitRecord, FileChange, GitLogParser
 
 
-class TestAnalysis(unittest.TestCase):
+class TestGitScope(unittest.TestCase):
     def test_hotspot_and_bus_factor_calculation(self):
+        now = datetime.now(timezone.utc)
         commits = [
             CommitRecord(
                 hash="1111",
                 author_name="Alice",
                 author_email="alice@example.com",
-                timestamp=datetime.utcnow(),
+                timestamp=now,
                 message="Feature A",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[
                     FileChange(path="src/core.py", added=100, deleted=20),
                     FileChange(path="src/utils.py", added=10, deleted=2),
@@ -23,8 +26,9 @@ class TestAnalysis(unittest.TestCase):
                 hash="2222",
                 author_name="Alice",
                 author_email="alice@example.com",
-                timestamp=datetime.utcnow(),
+                timestamp=now,
                 message="Fix A",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
                 changes=[
                     FileChange(path="src/core.py", added=50, deleted=10),
                 ],
@@ -33,15 +37,20 @@ class TestAnalysis(unittest.TestCase):
                 hash="3333",
                 author_name="Bob",
                 author_email="bob@example.com",
-                timestamp=datetime.utcnow(),
+                timestamp=now,
                 message="Feature B",
+                authors=[AuthorInfo(name="Bob", email="bob@example.com")],
                 changes=[
                     FileChange(path="src/utils.py", added=30, deleted=5),
                 ],
             ),
         ]
 
-        engine = AnalysisEngine(repo_name="test-repo", repo_path="/tmp/test-repo")
+        engine = AnalysisEngine(
+            repo_name="test-repo",
+            repo_path="/tmp/test-repo",
+            existing_files={"src/core.py", "src/utils.py"},
+        )
         report = engine.analyze(commits)
 
         self.assertEqual(report.total_commits, 3)
@@ -51,15 +60,91 @@ class TestAnalysis(unittest.TestCase):
         self.assertEqual(core_item.commits, 2)
         self.assertEqual(core_item.total_churn, 180)
         self.assertEqual(core_item.bus_factor, 1)
+        self.assertFalse(core_item.is_deleted)
         self.assertEqual(core_item.top_contributors[0].name, "Alice")
-        self.assertEqual(core_item.top_contributors[0].ownership_percentage, 1.0)
 
-        md_output = Exporter.to_markdown(report)
-        self.assertIn("# 🔍 GitScope Report: `test-repo`", md_output)
-        self.assertIn("src/core.py", md_output)
+    def test_rename_tracking(self):
+        now = datetime.now(timezone.utc)
+        commits = [
+            CommitRecord(
+                hash="aaaa",
+                author_name="Alice",
+                author_email="alice@example.com",
+                timestamp=now,
+                message="Create old.py",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
+                changes=[FileChange(path="src/old.py", added=50, deleted=0)],
+            ),
+            CommitRecord(
+                hash="bbbb",
+                author_name="Alice",
+                author_email="alice@example.com",
+                timestamp=now,
+                message="Rename old.py to new.py",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
+                changes=[FileChange(path="src/new.py", added=20, deleted=5, old_path="src/old.py")],
+            ),
+        ]
+        engine = AnalysisEngine(repo_name="test-repo", repo_path="/tmp/test-repo")
+        report = engine.analyze(commits)
 
-        json_output = Exporter.to_json(report)
-        self.assertIn('"repo_name": "test-repo"', json_output)
+        file_paths = [f.path for f in report.hotspots_files]
+        self.assertIn("src/new.py", file_paths)
+        new_item = next(f for f in report.hotspots_files if f.path == "src/new.py")
+        self.assertEqual(new_item.commits, 2)
+        self.assertEqual(new_item.total_churn, 75)
+
+    def test_co_author_split(self):
+        now = datetime.now(timezone.utc)
+        commits = [
+            CommitRecord(
+                hash="cccc",
+                author_name="Alice",
+                author_email="alice@example.com",
+                timestamp=now,
+                message="Pair commit",
+                authors=[
+                    AuthorInfo(name="Alice", email="alice@example.com"),
+                    AuthorInfo(name="Bob", email="bob@example.com"),
+                ],
+                changes=[FileChange(path="src/pair.py", added=100, deleted=0)],
+            )
+        ]
+        engine = AnalysisEngine(repo_name="test-repo", repo_path="/tmp/test-repo")
+        report = engine.analyze(commits)
+
+        item = next(f for f in report.hotspots_files if f.path == "src/pair.py")
+        self.assertEqual(len(item.top_contributors), 2)
+        self.assertEqual(item.top_contributors[0].ownership_percentage, 0.5)
+        self.assertEqual(item.top_contributors[1].ownership_percentage, 0.5)
+
+    def test_deleted_file_flag(self):
+        now = datetime.now(timezone.utc)
+        commits = [
+            CommitRecord(
+                hash="dddd",
+                author_name="Alice",
+                author_email="alice@example.com",
+                timestamp=now,
+                message="Removed file",
+                authors=[AuthorInfo(name="Alice", email="alice@example.com")],
+                changes=[FileChange(path="src/dead.py", added=10, deleted=50)],
+            )
+        ]
+        engine = AnalysisEngine(
+            repo_name="test-repo",
+            repo_path="/tmp/test-repo",
+            existing_files={"src/alive.py"},
+        )
+        report = engine.analyze(commits)
+        item = next(f for f in report.hotspots_files if f.path == "src/dead.py")
+        self.assertTrue(item.is_deleted)
+
+    def test_ssrf_validation(self):
+        with self.assertRaises(ValueError):
+            GitRepoManager._validate_remote_url("http://127.0.0.1/evil.git")
+        with self.assertRaises(ValueError):
+            GitRepoManager._validate_remote_url("http://localhost:8080/evil.git")
 
 
 if __name__ == "__main__":

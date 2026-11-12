@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from gitscope.models import ScopeReport
+from models import ScopeReport
 
 
 class Exporter:
@@ -19,16 +19,26 @@ class Exporter:
         md.append(f"- **Total Commits Analyzed:** {report.total_commits}")
         md.append(f"- **Total Contributors:** {report.total_authors}\n")
 
-        md.append("## 📈 Top File Hotspots\n")
+        md.append("## 👥 Contributor Breakdown: Who Contributed What\n")
+        md.append("| Contributor | Commits | Lines (+ / -) | Total Churn | Primary Focus Areas (Directories / Files) |")
+        md.append("| :--- | :---: | :---: | :---: | :--- |")
+        for c in report.contributors:
+            focus = ", ".join(f"`{d}`" for d in c.primary_directories) if c.primary_directories else "N/A"
+            md.append(
+                f"| **{c.name}** (`{c.email}`) | {c.total_commits} | +{c.lines_added} / -{c.lines_deleted} | {c.total_churn} | {focus} |"
+            )
+
+        md.append("\n## 📈 Top File Hotspots\n")
         md.append("> **How to read this:** Files with high churn (frequent modifications and large line diffs) combined with a low bus factor (knowledge concentrated in 1 person) represent high risk areas for regressions and team bottlenecks.\n")
-        md.append("| File Path | Commits | Churn (+ / -) | Bus Factor | Risk Level | Primary Author |")
-        md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+        md.append("| File Path | Status | Commits | Churn (+ / -) | Bus Factor | Risk Level | Primary Author |")
+        md.append("| :--- | :---: | :--- | :--- | :--- | :--- | :--- |")
 
         for f in report.hotspots_files[:top_n]:
             top_author = f.top_contributors[0].name if f.top_contributors else "N/A"
             risk_badge = f"**{f.risk_level}**" if f.risk_level == "High" else f.risk_level
+            status_badge = "❌ Deleted" if f.is_deleted else "✅ Active"
             md.append(
-                f"| `{f.path}` | {f.commits} | +{f.lines_added} / -{f.lines_deleted} | {f.bus_factor} | {risk_badge} | {top_author} |"
+                f"| `{f.path}` | {status_badge} | {f.commits} | +{f.lines_added} / -{f.lines_deleted} | {f.bus_factor} | {risk_badge} | {top_author} |"
             )
 
         md.append("\n## 📂 Directory Ownership & Knowledge Distribution\n")

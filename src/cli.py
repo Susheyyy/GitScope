@@ -6,10 +6,10 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from gitscope.analyzer import AnalysisEngine
-from gitscope.exporter import Exporter
-from gitscope.git_manager import GitRepoManager
-from gitscope.parser import GitLogParser
+from analyzer import AnalysisEngine
+from exporter import Exporter
+from git_manager import GitRepoManager
+from parser import GitLogParser
 
 console = Console()
 
@@ -36,14 +36,19 @@ def analyze(target: str, since: Optional[str], until: Optional[str], output_form
             manager = GitRepoManager(target)
             repo_path = manager.prepare()
             repo_name = Path(repo_path).name
+            existing_files = manager.get_existing_files()
 
-        with console.status("[bold cyan]Extracting and parsing commit history...[/bold cyan]"):
+        with console.status("[bold cyan]Analyzing git history (streaming)...[/bold cyan]"):
             parser = GitLogParser(repo_path, since=since, until=until)
-            commits = list(parser.parse_commits())
-
-        with console.status("[bold cyan]Analyzing hotspots and ownership metrics...[/bold cyan]"):
-            engine = AnalysisEngine(repo_name=repo_name, repo_path=str(repo_path), since=since, until=until)
-            report = engine.analyze(commits)
+            commit_stream = parser.parse_commits()
+            engine = AnalysisEngine(
+                repo_name=repo_name,
+                repo_path=str(repo_path),
+                since=since,
+                until=until,
+                existing_files=existing_files,
+            )
+            report = engine.analyze(commit_stream)
 
         if output_format == "json":
             result = Exporter.to_json(report)
@@ -76,10 +81,30 @@ def analyze(target: str, since: Optional[str], until: Optional[str], output_form
 
 def _render_terminal_dashboard(report):
     console.print(f"\n[bold green]GitScope Analysis Report:[/bold green] [bold white]{report.repo_name}[/bold white]")
-    console.print(f"Total Commits: [cyan]{report.total_commits}[/cyan] | Authors: [cyan]{report.total_authors}[/cyan]\n")
+    console.print(f"Total Commits: [cyan]{report.total_commits}[/cyan] | Contributors: [cyan]{report.total_authors}[/cyan]\n")
 
-    f_table = Table(title="Top File Hotspots (High Churn & Bus-Factor Risk)")
+    c_table = Table(title="👥 Contributor Breakdown (Who Contributed What)")
+    c_table.add_column("Contributor", style="magenta", no_wrap=True)
+    c_table.add_column("Commits", justify="right")
+    c_table.add_column("Lines (+ / -)", justify="right")
+    c_table.add_column("Total Churn", justify="right")
+    c_table.add_column("Primary Focus Areas (Directories)", style="cyan")
+
+    for c in report.contributors:
+        areas = ", ".join(c.primary_directories) if c.primary_directories else "root"
+        c_table.add_row(
+            f"{c.name}\n[dim]{c.email}[/dim]",
+            str(c.total_commits),
+            f"+{c.lines_added} / -{c.lines_deleted}",
+            str(c.total_churn),
+            areas,
+        )
+
+    console.print(c_table)
+
+    f_table = Table(title="\n📈 Top File Hotspots (High Churn & Bus-Factor Risk)")
     f_table.add_column("File Path", style="cyan", no_wrap=True)
+    f_table.add_column("Status", justify="center")
     f_table.add_column("Commits", justify="right")
     f_table.add_column("Lines (+ / -)", justify="right")
     f_table.add_column("Bus Factor", justify="center")
@@ -89,8 +114,10 @@ def _render_terminal_dashboard(report):
     for f in report.hotspots_files[:10]:
         top_author = f.top_contributors[0].name if f.top_contributors else "N/A"
         risk_style = "bold red" if f.risk_level == "High" else ("yellow" if f.risk_level == "Medium" else "green")
+        status_text = "[red]Deleted[/red]" if f.is_deleted else "[green]Active[/green]"
         f_table.add_row(
             f.path,
+            status_text,
             str(f.commits),
             f"+{f.lines_added} / -{f.lines_deleted}",
             str(f.bus_factor),
@@ -100,7 +127,7 @@ def _render_terminal_dashboard(report):
 
     console.print(f_table)
 
-    d_table = Table(title="\nDirectory Ownership Breakdown")
+    d_table = Table(title="\n📂 Directory Ownership Breakdown")
     d_table.add_column("Directory", style="cyan")
     d_table.add_column("Commits", justify="right")
     d_table.add_column("Total Churn", justify="right")
